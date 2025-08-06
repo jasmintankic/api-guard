@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: API Guard
+  data:
+    redis:
+      port: 6379
+      host: redis
+
+bruteforce:
+  username:
+    threshold: 5
+  ip:
+    threshold: 10
+  expiry:
+    minutes: 15
+  window:
+    minutes: 4
+
+deviceabuse:
+  fingerprint:
+    threshold: 3
+    expiry:
+      minutes: 15
+
+enumeration:
+  threshold: 3
+  expiry:
+    minutes: 15
+
+ipabuse:
+  threshold: 25
+  expiry:
+    minutes: 15
+
+replay:
+  window:
+    millis: 5000
+  trigger:
+    threshold: 2
+
+server:
+  servlet:
+    context-path: /api

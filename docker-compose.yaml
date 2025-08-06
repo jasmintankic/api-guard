@@ -1,0 +1,31 @@
+services:
+  redis:
+    image: redis:latest
+    container_name: redis-local
+    ports:
+      - "6379:6379"
+    networks:
+      - apiguard-net
+    restart: unless-stopped
+
+  apiguard:
+    build: .
+    container_name: apiguard-service
+    depends_on:
+      - redis
+    networks:
+      - apiguard-net
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount your local application-local.yaml for profile-specific config
+      - ./application-local.yaml:/app/application-docker.yaml
+    environment:
+      # Activate 'local' Spring profile so app uses application-local.yaml
+      - SPRING_PROFILES_ACTIVE=docker
+      # (Optional) If you want to force config location instead of default search paths:
+      # - SPRING_CONFIG_LOCATION=file:/app/application-local.yaml
+
+networks:
+  apiguard-net:
+    driver: bridge
