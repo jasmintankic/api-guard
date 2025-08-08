@@ -6,15 +6,91 @@ spring:
       port: 6379
       host: localhost
 
-bruteforce:
-  username:
-    threshold: 5
-  ip:
+detectors:
+  bruteforce:
+    threshold:
+      username: 5
+      ip: 6
+      user-ip: 3
+    window-minutes: 5     # aggregate over last 5 minutes
+    bucket-minutes: 1     # your 1-minute buckets
+    expiry-minutes: 12    # TTL for bucket keys
+    cool-off-seconds: 60  # lock TTL when tripped
+  enumeration:
+    threshold: 20
+    window-minutes: 5
+    bucket-minutes: 1
+    expiry-minutes: 12
+    cool-off-seconds: 120
+    include-user-agent-in-principal: true
+  replay:
+    protected-methods: [POST, PUT, PATCH, DELETE]
+    window-millis: 120000
+    abuse-threshold: 3
+    cool-off-seconds: 120
+    include-user-agent-in-principal: true
+    max-body-bytes: 65536
+    canonicalize-json: true
+    idempotency-header-names: [Correlation-Id, Idempotency-Key, X-Request-Id]
+    ignored-query-params: [utm_source, utm_medium, utm_campaign, utm_term, utm_content, tracking_id]
+  ipabuse:
+    window-minutes: 5
+    bucket-minutes: 1
+    expiry-minutes: 12
+    cool-off-seconds: 120
     threshold: 10
-  expiry:
-    minutes: 15
-  window:
-    minutes: 4
+    include-user-agent-in-principal: true
+    exclude-patterns: ["/health", "/actuator/**", "/metrics", "/static/**"]
+    weighted-patterns:
+      "/login": 3
+      "/reset-password": 3
+      "/admin/**": 5
+    allowlist: []
+  device-anomaly:
+    window-minutes: 10
+    bucket-minutes: 1
+    expiry-minutes: 30
+    cool-off-seconds: 300
+    threshold-users-per-device: 2
+    threshold-devices-per-user: 2
+    threshold-ips-per-device: 2
+    include-user-agent-in-principal: true
+    vendor-id-header-names: [X-Vendor-Id, Vendor-Id, Device-Id]
+    fingerprint-header-names: [X-Fingerprint, Fingerprint, Browser-Fingerprint]
+
+extractors:
+  rules:
+    username:
+      - source: QUERY
+        key: username
+      - source: BODY_JSON
+        key: username
+      - source: BODY_FORM
+        key: username
+      - source: HEADER
+        key: x-user
+    correlation-id:
+      - source: HEADER
+        key: x-correlation-id
+      - source: HEADER
+        key: x-request-id
+    device:
+      - source: HEADER
+        key: vendor-id
+      - source: HEADER
+        key: x-device-id
+      - source: HEADER
+        key: fingerprint
+    client-ip:
+      - source: HEADER
+        key: x-forwarded-for
+      - source: HEADER
+        key: x-real-ip
+      - source: HEADER
+        key: forwarded
+    user-agent:
+      - source: HEADER
+        key: user-agent
 
 deviceabuse:
   fingerprint:
@@ -22,21 +98,6 @@ deviceabuse:
     expiry:
       minutes: 15
 
-enumeration:
-  threshold: 3
-  expiry:
-    minutes: 15
-
-ipabuse:
-  threshold: 6
-  expiry:
-    minutes: 15
-
-replay:
-  window:
-    millis: 50000
-  trigger:
-    threshold: 2
 
 server:
   servlet:

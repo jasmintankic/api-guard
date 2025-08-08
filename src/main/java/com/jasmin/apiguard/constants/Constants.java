@@ -9,4 +9,6 @@ public class Constants {
     public static String KNOWN_BAD_DEVICE = "KNOWN_BAD_DEVICE";
     public static String KNOWN_BAD_CORRELATION_ID = "KNOWN_BAD_CORRELATION_ID";
     public static String KNOWN_BAD_IP = "KNOWN_BAD_IP";
+    public static final String DEVICE_ABUSE = "DEVICE_ABUSE";
+
 }

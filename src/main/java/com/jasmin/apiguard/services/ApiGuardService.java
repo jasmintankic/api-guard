@@ -15,13 +15,13 @@ public class ApiGuardService {
     private final PreCheckService preCheckService;
 
     public DetectionVerdict check(SecurityEvent event) {
-        DetectionVerdict preCheckVerdict = preCheckService.preCheck(event);
+//        DetectionVerdict preCheckVerdict = preCheckService.preCheck(event);
 
-        if (preCheckVerdict != null) {
-            securityEventStreamService.publishEvent(event, preCheckVerdict);
-            securityAlertPublisher.publishAlert(event, preCheckVerdict);
-            return preCheckVerdict;
-        }
+//        if (preCheckVerdict != null) {
+//            securityEventStreamService.publishEvent(event, preCheckVerdict);
+//            securityAlertPublisher.publishAlert(event, preCheckVerdict);
+//            return preCheckVerdict;
+//        }
 
         DetectionVerdict verdict = detectionEngine.processEvent(event);
 

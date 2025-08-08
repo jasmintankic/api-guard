@@ -21,12 +21,12 @@ public class SecurityAlertPublisher {
 
     public void publishAlert(SecurityEvent event, DetectionVerdict verdict) {
         Map<String, Object> alert = new HashMap<>();
-        alert.put("ip", event.getIp());
-        alert.put("username", event.getUsername());
-        alert.put("fingerprint", event.getDeviceFingerprint());
-        alert.put("action", event.getAction());
-        alert.put("status", event.getStatus());
-        alert.put("endpoint", event.getEndpoint());
+//        alert.put("ip", event.getIp());
+//        alert.put("username", event.getUsername());
+//        alert.put("fingerprint", event.getDeviceFingerprint());
+//        alert.put("action", event.getAction());
+//        alert.put("status", event.getStatus());
+//        alert.put("endpoint", event.getEndpoint());
         alert.put("timestamp", event.getTimestamp().toString());
         alert.put("threats", verdict.getThreats());
         alert.put("recommendations", verdict.getRecommendations());

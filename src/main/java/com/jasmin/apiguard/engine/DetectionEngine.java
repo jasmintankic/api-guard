@@ -25,7 +25,7 @@ public class DetectionEngine {
             verdict.ifPresent(v -> {
                 threats.addAll(v.getThreats());
                 recommendations.addAll(v.getRecommendations());
-                if (v.getDetails() != null) details.append(v.getDetails()).append(" ");
+                if (v.getDetails() != null) details.append(v.getDetails()).append(" -> ");
             });
         }
         return new DetectionVerdict(threats, recommendations, details.toString().trim());

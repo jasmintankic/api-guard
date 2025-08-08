@@ -22,12 +22,12 @@ public class SecurityEventStreamService {
 
     public void publishEvent(SecurityEvent event, DetectionVerdict verdict) {
         Map<String, String> data = new HashMap<>();
-        data.put("ip", event.getIp());
-        data.put("username", event.getUsername());
-        data.put("fingerprint", event.getDeviceFingerprint());
-        data.put("action", event.getAction());
-        data.put("status", event.getStatus());
-        data.put("endpoint", event.getEndpoint());
+//        data.put("ip", event.getIp());
+//        data.put("username", event.getUsername());
+//        data.put("fingerprint", event.getDeviceFingerprint());
+//        data.put("action", event.getAction());
+//        data.put("status", event.getStatus());
+//        data.put("endpoint", event.getEndpoint());
         data.put("timestamp", event.getTimestamp().toString());
         data.put("threats", String.join(",", verdict.getThreats()));
         data.put("recommendations", String.join(",", verdict.getRecommendations()));
