@@ -17,12 +17,25 @@ detectors:
     expiry-minutes: 12    # TTL for bucket keys
     cool-off-seconds: 60  # lock TTL when tripped
   enumeration:
-    threshold: 20
-    window-minutes: 5
-    bucket-minutes: 1
-    expiry-minutes: 12
-    cool-off-seconds: 120
-    include-user-agent-in-principal: true
+    threshold: 3                  # Unique usernames from a single principal in 'windowMinutes' to trigger
+    windowMinutes: 5              # Sliding window size (minutes)
+    bucketMinutes: 1              # Bucket granularity (minutes); usually 1 for minute-level resolution
+    expiryMinutes: 12             # TTL for per-bucket HLL keys (minutes)
+    # IMPORTANT: Keep >= windowMinutes + bucketMinutes to avoid losing data early
+
+    # === Lock settings ===
+    coolOffSeconds: 120           # How long to block a principal after detection (seconds)
+    includeUserAgentInPrincipal: true  # Use IP+UserAgent as principal ID to reduce NAT false positives
+
+    # === Signal B: distinct IPs per username ===
+    userIpsThreshold: 30          # Distinct IPs hitting the same username to trigger
+    userIpsWindowMinutes: 15      # Sliding window for distinct IPs per username (minutes)
+    userIpsExpiryMinutes: 20      # TTL for user-IPs HLL buckets (minutes)
+    # IMPORTANT: Keep >= userIpsWindowMinutes + bucketMinutes
+
+    # === Signal C: per-principal raw request rate ===
+    ipRateLimit: 90                # Max requests allowed per principal in ipRateWindowSeconds
+    ipRateWindowSeconds: 60        # Sliding window size for raw request limiter (seconds)
   replay:
     protected-methods: [POST, PUT, PATCH, DELETE]
     window-millis: 120000
@@ -33,31 +46,99 @@ detectors:
     canonicalize-json: true
     idempotency-header-names: [Correlation-Id, Idempotency-Key, X-Request-Id]
     ignored-query-params: [utm_source, utm_medium, utm_campaign, utm_term, utm_content, tracking_id]
-  ipabuse:
+  ip-rate-limit-abuse:
+    includeUserAgentInPrincipal: true
+    allowlist: []          # e.g., ["ip:127.0.0.1", "10.0.0.5"]
+    excludePatterns:
+    # Request-credit model
+    creditsPerSecond: 2   # sustained ~2 rps
+    maxCredits: 10        # burst of ~10 requests
+    creditsPerRequest: 1
+    idleTtl: 1m
+    # Lock & escalation
+    coolOffSeconds: 30
+    strikeEscalationEnabled: false
+    strikeWindowSeconds: 600
+    strike1LockSeconds: 30
+    strike2LockSeconds: 300
+    strike3LockSeconds: 3600
+  device-anomaly:
+    # List of HTTP headers used to uniquely identify a device
+    identifierHeaderCandidates: ["x-vendor-id", "x-fingerprint-id"]
+
+    # Whether to include the User-Agent string as part of device identity
+    includeUserAgentInPrincipal: false
+
+    # Whether to fall back to IP address as device identity if headers are missing
+    fallbackToIp: false
+
+    # Time window in seconds (10 min) for counting anomalies
+    windowSeconds: 600
+
+    # Max number of distinct IPs a single device can use in the window before triggering suspicion
+    distinctIpThreshold: 2
+
+    # Number of times IP can switch in the window before being flagged
+    ipSwitchThreshold: 6
+
+    # Duration in seconds to keep a flagged device in a restricted "cool-off" state
+    coolOffSeconds: 120
+
+    # Actions to take when a device is fanning out across multiple IPs
+    actionsOnFanout: ["CHALLENGE_MFA", "RATE_LIMIT"]
+
+    # Actions to take when device identifiers are rapidly changing
+    actionsOnChurn: ["CHALLENGE_CAPTCHA"]
+
+    # Actions to take while a device is in the locked/cool-off state
+    actionsDuringLock: ["RATE_LIMIT"]
+
+    # URL path patterns to ignore in anomaly detection
+    excludePatterns: ["/health", "/metrics"]
+  traffic-anomaly:
+    # Learns baseline steadily, adapts within minutes but not jittery
+    alpha: 0.22
+    # Require a strong deviation from normal for an alert (≈ 4σ)
+    z-threshold: 4.0
+    # Guard against single-source noise; expect distributed surges
+    min-distinct-ips: 200
+    # Don’t alert until we’ve seen enough distinct minutes
+    min-sample-minutes: 15
+    # Union of the last N minute-buckets when counting distinct IPs
     window-minutes: 5
     bucket-minutes: 1
-    expiry-minutes: 12
-    cool-off-seconds: 120
-    threshold: 10
-    include-user-agent-in-principal: true
-    exclude-patterns: ["/health", "/actuator/**", "/metrics", "/static/**"]
-    weighted-patterns:
-      "/login": 3
-      "/reset-password": 3
-      "/admin/**": 5
-    allowlist: []
-  device-anomaly:
-    window-minutes: 10
-    bucket-minutes: 1
-    expiry-minutes: 30
-    cool-off-seconds: 300
-    threshold-users-per-device: 2
-    threshold-devices-per-user: 2
-    threshold-ips-per-device: 2
-    include-user-agent-in-principal: true
-    vendor-id-header-names: [X-Vendor-Id, Vendor-Id, Device-Id]
-    fingerprint-header-names: [X-Fingerprint, Fingerprint, Browser-Fingerprint]
-
+    # Keep buckets slightly longer than the window (cleanup via TTL)
+    expiry-minutes: 15
+    # How long to keep an endpoint in a soft cool-off once tripped
+    cool-off-seconds: 180
+    exclude-patterns: ["/health", "/metrics", "/static", "/favicon"]
+  ddos:
+    enabled: true                    # If false, detect() returns Optional.empty()
+    keyPrefix: "ag"                  # Redis key namespace prefix (e.g., ag:ip:1.2.3.4:s1)
+    # Fixed-window TTLs (seconds)
+    windowsS1TtlSeconds: 2           # TTL for 1s bucket keys
+    windowsS10TtlSeconds: 20         # TTL for 10s bucket keys
+    windowsUniqTtlSeconds: 180       # TTL for distinct-IP HyperLogLog keys
+    # Thresholds — tune from production histograms
+    thresholdsPerIpS1: 30            # Max requests per IP per 1s bucket
+    thresholdsPerIpS10: 150          # Max requests per IP per 10s bucket
+    thresholdsGlobalS1: 2000         # Max total requests across all IPs per 1s
+    thresholdsGlobalS10: 10000       # Max total requests across all IPs per 10s
+    thresholdsPerPathS10: 3000       # Max requests per normalized path per 10s
+    thresholdsUniqIpsPerMinute: 2000 # Approx distinct IPs (HyperLogLog) in current minute
+    # Signals (turn off to save CPU if unused)
+    signalsUseDistinctIpSurge: true  # Enable HyperLogLog distinct-IP detection
+    signalsCheckSuspiciousUa: true   # Add a UA-based heuristic (cheap but useful)
+    # Client IP extraction — first non-empty header wins; falls back to event.ip/remoteAddr
+    ipHeaders:
+      - "x-forwarded-for"           # may contain CSV; first hop is taken
+      - "x-real-ip"
+    # Treat empty/unknown UA as suspicious; add simple signatures here
+    suspiciousUserAgents:
+      - "curl/"
+      - "python-requests"
+      - "scrapy"
+      - "ahrefsbot"
 extractors:
   rules:
     username:
@@ -92,12 +173,19 @@ extractors:
       - source: HEADER
         key: user-agent
 
-deviceabuse:
-  fingerprint:
-    threshold: 3
-    expiry:
-      minutes: 15
-
+threat-bucket-properties:
+  day-key-prefix: apiguard:threats           # details ZSET: <prefix>:YYYY-MM-DD
+  agg-prefix: apiguard:agg                    # aggregates live under this prefix
+  tmp-prefix: apiguard:tmp                    # temp keys for unions
+  retention-days: 10
+  max-header-bytes: 32768
+  max-body-bytes: 65536
+  max-results: 10000                          # safety cap per request
+  summary:
+    top-ips: 20                               # how many IPs for the overview
+    top-threats-per-ip: 5
+    top-paths-per-ip: 5
+    temp-ttl-seconds: 60
 
 server:
   servlet:

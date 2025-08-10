@@ -5,6 +5,7 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -12,27 +13,24 @@ import java.util.List;
 @ConfigurationProperties(prefix = "detectors.device-anomaly")
 public class DeviceAnomalyProperties {
 
-    /** Sliding window length in minutes (sum across buckets). */
-    @Min(1) private int windowMinutes = 10;
+    /** Identity extraction (ordered; first non-empty wins) */
+    private List<String> identifierHeaderCandidates = new ArrayList<>(List.of("x-vendor-id", "x-fingerprint-id"));
+    private boolean includeUserAgentInPrincipal = false;
+    private boolean fallbackToIp = false;
 
-    /** Bucket granularity in minutes. */
-    @Min(1) private int bucketMinutes = 1;
+    /** Bypass */
+    private List<String> allowlistIdentifiers = new ArrayList<>();
+    private List<String> allowlistIps = new ArrayList<>();
+    private List<String> excludePatterns = new ArrayList<>(List.of("/health", "/metrics"));
 
-    /** TTL for per-bucket sets (minutes). Keep > windowMinutes to cover lag. */
-    @Min(1) private int expiryMinutes = 30;
+    /** Window & thresholds */
+    private int windowSeconds = 10 * 60;   // 10 minutes
+    private int distinctIpThreshold = 4;   // >= 4 IPs in window → fan-out trip
+    private int ipSwitchThreshold = 6;     // >= 6 IP switches in window → churn trip
+    private int coolOffSeconds = 120;      // lock TTL when we BLOCK
 
-    /** Lock duration (seconds) when a threshold trips. */
-    @Min(1) private int coolOffSeconds = 300;
-
-    /** Thresholds (distinct counts over the window). */
-    @Min(1) private int thresholdUsersPerDevice = 5;   // device -> many users
-    @Min(1) private int thresholdDevicesPerUser = 4;   // user -> many devices
-    @Min(1) private int thresholdIpsPerDevice   = 6;   // device -> many IPs
-
-    /** Include UA hash in device principal to reduce NAT false positives. */
-    private boolean includeUserAgentInPrincipal = true;
-
-    /** Header names (case-insensitive) to read device identifiers from. */
-    private List<String> vendorIdHeaderNames = List.of("X-Vendor-Id", "Vendor-Id", "Device-Id");
-    private List<String> fingerprintHeaderNames = List.of("X-Fingerprint", "Fingerprint", "Browser-Fingerprint");
+    /** Actions */
+    private List<String> actionsOnFanout = new ArrayList<>(List.of("CHALLENGE_MFA", "RATE_LIMIT"));
+    private List<String> actionsOnChurn  = new ArrayList<>(List.of("CHALLENGE_CAPTCHA"));
+    private List<String> actionsDuringLock = new ArrayList<>(List.of("RATE_LIMIT"));
 }

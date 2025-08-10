@@ -3,33 +3,19 @@ package com.jasmin.apiguard.detectors.replaydetector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jasmin.apiguard.constants.Constants;
 import com.jasmin.apiguard.detectors.Detector;
+import com.jasmin.apiguard.detectors.DetectorUtils;
 import com.jasmin.apiguard.models.DetectionVerdict;
 import com.jasmin.apiguard.models.SecurityEvent;
-import com.jasmin.apiguard.services.KeyManager;
-import com.jasmin.apiguard.services.ThreatBucketService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
 
-/**
- * ReplayAttackDetector enforces idempotency for mutating requests and throttles replay abuse.
- *
- * <p>How it works:
- * <ul>
- *   <li>Builds an operation shape: METHOD + canonical PATH + canonical QUERY + BODY hash.</li>
- *   <li>If an explicit idempotency header exists (Correlation-Id / Idempotency-Key / X-Request-Id),
- *       it is bound to the operation shape; otherwise the shape alone is used.</li>
- *   <li>Uses Redis SET NX PX to allow the first occurrence within the window and reject duplicates.</li>
- *   <li>Counts duplicates per principal (IP or IP+UA) and applies a short cool-off lock when abuse is detected.</li>
- * </ul>
- * All keys auto-expire; operations are O(1).
- */
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -40,8 +26,16 @@ public class ReplayAttackDetector implements Detector {
     private static final String NS_COUNT   = "replay:count";  // duplicate counters
     private static final String NS_LOCK    = "replay:lock";   // principal cool-off
 
+    /** Maximum length a key can be before it is abbreviated. */
+    private static final int MAX_KEY_LENGTH = 16;
+
+    /** Number of characters to keep from the start and end when abbreviating. */
+    private static final int KEY_PART_LENGTH = 8;
+
+    /** The string used to indicate that part of the key has been omitted. */
+    private static final String ELLIPSIS = "…";
+
     private final StringRedisTemplate redis;
-    private final ThreatBucketService threatBucketService;
     private final ReplayProperties cfg;
 
     // Reuse a single ObjectMapper for JSON canonicalization
@@ -50,7 +44,9 @@ public class ReplayAttackDetector implements Detector {
     @Override
     public Optional<DetectionVerdict> detect(SecurityEvent event) {
         // Only protect configured methods (keep GET/HEAD free unless you explicitly opt-in)
-        if (!isProtectedMethod(event.getMethod())) return Optional.empty();
+        if (!isProtectedMethod(event.getMethod())) {
+            return Optional.empty();
+        }
 
         // Principal used only for mitigation (not part of equality)
         final String principal = principalId(event);
@@ -64,8 +60,8 @@ public class ReplayAttackDetector implements Detector {
         // Build "operation shape" and final request identity
         final String opShape = operationShape(event);
         final String requestIdentity = explicitIdKey(event)
-                .map(id -> hashHex(id + "|" + opShape))  // bind ID to operation to prevent cross-endpoint reuse
-                .orElseGet(() -> hashHex(opShape));
+                .map(id -> DetectorUtils.sha256Hex(id + "|" + opShape))  // bind ID to operation to prevent cross-endpoint reuse
+                .orElseGet(() -> DetectorUtils.sha256Hex(opShape));
 
         // Idempotency enforcement: first seen wins within window
         final String enforceKey = NS_ENFORCE + ":" + requestIdentity;
@@ -87,8 +83,6 @@ public class ReplayAttackDetector implements Detector {
         if (n != null && n >= cfg.getAbuseThreshold()) {
             lockPrincipal(principal, Duration.ofSeconds(cfg.getCoolOffSeconds()));
             // Bucket this IP for broader mitigation decisions in your pipeline
-            threatBucketService.addToBucket(KeyManager.MALICIOUS_IP_BUCKET, firstNonEmpty(event.getIp(), event.getRemoteAddr()));
-
             if (log.isWarnEnabled()) {
                 log.warn("Replay abuse: principal={} identity={} duplicates={} windowMs={}",
                         principal, shortKey(requestIdentity), n, cfg.getWindowMillis());
@@ -106,8 +100,6 @@ public class ReplayAttackDetector implements Detector {
         return Optional.of(verdict("Duplicate request within idempotency window", List.of("REJECT_REQUEST")));
     }
 
-    // ======== Helpers (short & documented) ========
-
     /** True if HTTP method is protected (mutating methods by default). */
     private boolean isProtectedMethod(String method) {
         return method != null && cfg.getProtectedMethods().contains(method.toUpperCase(Locale.ROOT));
@@ -115,7 +107,7 @@ public class ReplayAttackDetector implements Detector {
 
     /** Principal to lock on abuse: IP or IP+UA (UA hashed) to reduce big-NAT false positives. */
     private String principalId(SecurityEvent e) {
-        String ip = firstNonEmpty(e.getIp(), e.getRemoteAddr(), "unknown");
+        String ip = DetectorUtils.firstNonEmpty(e.getIp(), e.getRemoteAddr(), "unknown");
         if (!cfg.isIncludeUserAgentInPrincipal()) return "ip:" + ip;
         String ua = headerFirst(e.getHeaders(), "User-Agent");
         return "ipua:" + ip + ":" + ua.hashCode();
@@ -123,8 +115,8 @@ public class ReplayAttackDetector implements Detector {
 
     /** Builds a stable description of the operation: METHOD + canonical PATH + canonical QUERY + BODY hash. */
     private String operationShape(SecurityEvent e) {
-        String method = nn(e.getMethod()).toUpperCase(Locale.ROOT);
-        String path   = canonicalPath(nn(e.getPath()));
+        String method = DetectorUtils.getValueOrEmptyString(e.getMethod()).toUpperCase(Locale.ROOT);
+        String path   = canonicalPath(DetectorUtils.getValueOrEmptyString(e.getPath()));
         String query  = canonicalQuery(e.getQueryParams(), cfg.getIgnoredQueryParams());
         String bodyH  = bodyHash(e.getContentType(), e.getBody());
         return "m=" + method + "&p=" + path + "&q=" + query + "&b=" + bodyH;
@@ -152,7 +144,7 @@ public class ReplayAttackDetector implements Detector {
             if (en.getKey() != null && en.getKey().equalsIgnoreCase(name)) {
                 List<String> vals = en.getValue();
                 if (vals != null && !vals.isEmpty()) {
-                    String v = vals.get(0);
+                    String v = vals.getFirst();
                     return v == null ? "" : v;
                 }
                 return "";
@@ -194,24 +186,24 @@ public class ReplayAttackDetector implements Detector {
     private String bodyHash(String contentType, byte[] body) {
         byte[] raw = (body == null) ? new byte[0] : body;
         if (raw.length == 0) return "nobody";
-        int len = (int) Math.min(raw.length, cfg.getMaxBodyBytes());
+        int len = Math.min(raw.length, cfg.getMaxBodyBytes());
         String slice = new String(raw, 0, len, StandardCharsets.UTF_8);
 
         String ct = contentType == null ? "" : contentType.toLowerCase(Locale.ROOT);
         if (cfg.isCanonicalizeJson() && ct.contains("application/json")) {
             try {
-                return hashHex("json:" + mapper.writeValueAsString(mapper.readTree(slice)));
+                return DetectorUtils.sha256Hex("json:" + mapper.writeValueAsString(mapper.readTree(slice)));
             } catch (Exception ex) {
                 // fall through to raw hashing
             }
         }
-        return hashHex("raw:" + slice);
+        return DetectorUtils.sha256Hex("raw:" + slice);
     }
 
     /** True if the principal has an active cool-off lock. */
     private boolean isLocked(String principal) {
         Long ttl = redis.getExpire(NS_LOCK + ":" + principal);
-        return ttl != null && ttl > 0;
+        return ttl > 0;
     }
 
     /** Locks the principal for the given TTL to short-circuit abusive replays. */
@@ -219,26 +211,24 @@ public class ReplayAttackDetector implements Detector {
         redis.opsForValue().set(NS_LOCK + ":" + principal, "1", ttl);
     }
 
-    /** SHA-256 hex helper for compact, uniform Redis keys. */
-    private String hashHex(String s) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] dig = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(dig.length * 2);
-            for (byte b : dig) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (Exception ex) {
-            // Extremely unlikely; fallback keeps flow alive (reduced collision resistance).
-            return "hashfail:" + Math.abs(s.hashCode());
-        }
-    }
-
-    /** Never-null string. */
-    private static String nn(String s) { return (s == null) ? "" : s; }
-
-    /** Shortens long hashes for logs/messages. */
-    private static String shortKey(String k) {
-        return (k.length() <= 16) ? k : k.substring(0, 8) + "…" + k.substring(k.length() - 8);
+    /**
+     * Utility for shortening long keys for logging, debugging, or display purposes.
+     * <p>
+     * If the input string length is less than or equal to {@link #MAX_KEY_LENGTH}, the string is returned unchanged.
+     * Otherwise, the string is abbreviated by keeping the first {@link #KEY_PART_LENGTH} characters
+     * and the last {@link #KEY_PART_LENGTH} characters, separated by an {@link #ELLIPSIS}.
+     * <p>
+     * Example:
+     * <pre>
+     * shortKey("12345678901234567890")  → "12345678…34567890"
+     * shortKey("short")                → "short"
+     * </pre>
+     */
+    private static String shortKey(String key) {
+        if (key == null) return null;
+        return (key.length() <= MAX_KEY_LENGTH)
+                ? key
+                : key.substring(0, KEY_PART_LENGTH) + ELLIPSIS + key.substring(key.length() - KEY_PART_LENGTH);
     }
 
     /** Standard detection verdict for replay decisions. */

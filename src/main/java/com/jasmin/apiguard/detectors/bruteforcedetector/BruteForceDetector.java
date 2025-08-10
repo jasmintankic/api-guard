@@ -2,6 +2,7 @@ package com.jasmin.apiguard.detectors.bruteforcedetector;
 
 import com.jasmin.apiguard.constants.Constants;
 import com.jasmin.apiguard.detectors.Detector;
+import com.jasmin.apiguard.detectors.DetectorUtils;
 import com.jasmin.apiguard.models.DetectionVerdict;
 import com.jasmin.apiguard.models.SecurityEvent;
 import lombok.RequiredArgsConstructor;
@@ -9,9 +10,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -23,25 +21,24 @@ public class BruteForceDetector implements Detector {
     private final StringRedisTemplate redis;
     private final BruteForceProperties cfg;
 
-    private static final DateTimeFormatter BUCKET_FMT = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
     private static final String NS_COUNTER = "bf";       // counter namespace
     private static final String NS_LOCK = "bf:lock";  // lock namespace
 
     @Override
     public Optional<DetectionVerdict> detect(SecurityEvent event) {
-        if (!isLoginAttempt(event) || isKnownSuccess(event)) {
+        if (!DetectorUtils.isLoginAttempt(event)) {
             return Optional.empty();
         }
 
-        final String username = normalizeUser(nullSafe(event.getUsername()));
-        final String ip = nullSafe(event.getIp());
-        final long epochMinute = toEpochMinute(event);
+        final String username = DetectorUtils.normalizeValue(DetectorUtils.nullSafe(event.getUsername()));
+        final String ip = DetectorUtils.nullSafe(event.getIp());
+        final long epochMinute = DetectorUtils.toEpochMinute(event.getTimestamp());
 
         final String userId = username;
         final String ipId = ip;
         final String userIpId = username + ":" + ip;
 
-        // 1) Fast-path: if any lock active, block immediately (no increments)
+        // 1) Fast-path: if any lock active, suspect immediately (no increments)
         Map<BruteForceScope, String> lockKeys = Map.of(
                 BruteForceScope.USERNAME, lockKey(BruteForceScope.USERNAME, userId),
                 BruteForceScope.IP, lockKey(BruteForceScope.IP, ipId),
@@ -53,7 +50,7 @@ public class BruteForceDetector implements Detector {
         }
 
         // 2) Increment current bucket (per scope) and set TTL
-        String bucketId = formatBucketId(epochMinute, cfg.getBucketMinutes());
+        String bucketId = DetectorUtils.formatBucketId(epochMinute, cfg.getBucketMinutes());
         Map<BruteForceScope, String> bucketKeys = Map.of(
                 BruteForceScope.USERNAME, bucketKey(BruteForceScope.USERNAME, userId, bucketId),
                 BruteForceScope.IP, bucketKey(BruteForceScope.IP, ipId, bucketId),
@@ -63,10 +60,11 @@ public class BruteForceDetector implements Detector {
 
         // 3) Sum sliding window across last N buckets
         int bucketsToSum = Math.max(1, cfg.getWindowMinutes() / cfg.getBucketMinutes());
+
         Map<BruteForceScope, Long> sums = Map.of(
-                BruteForceScope.USERNAME, sumBuckets(keysForWindow(BruteForceScope.USERNAME, userId, epochMinute, bucketsToSum)),
-                BruteForceScope.IP, sumBuckets(keysForWindow(BruteForceScope.IP, ipId, epochMinute, bucketsToSum)),
-                BruteForceScope.USER_IP, sumBuckets(keysForWindow(BruteForceScope.USER_IP, userIpId, epochMinute, bucketsToSum))
+                BruteForceScope.USERNAME, DetectorUtils.sumBuckets(redis.opsForValue().multiGet(keysForWindow(BruteForceScope.USERNAME, userId, epochMinute, bucketsToSum))),
+                BruteForceScope.IP, DetectorUtils.sumBuckets(redis.opsForValue().multiGet(keysForWindow(BruteForceScope.IP, ipId, epochMinute, bucketsToSum))),
+                BruteForceScope.USER_IP, DetectorUtils.sumBuckets(redis.opsForValue().multiGet(keysForWindow(BruteForceScope.USER_IP, userIpId, epochMinute, bucketsToSum)))
         );
 
         // 4) Check thresholds and set appropriate locks
@@ -92,49 +90,6 @@ public class BruteForceDetector implements Detector {
         }
 
         return Optional.empty();
-    }
-
-    /**
-     * Determines if the event represents a known successful login.
-     * Currently always returns false (treats all login attempts as failures),
-     * but can be wired to check event status/flags.
-     */
-    private boolean isKnownSuccess(SecurityEvent e) {
-        // e.g., return Boolean.TRUE.equals(e.getSuccess()) or "SUCCESS".equalsIgnoreCase(e.getStatus());
-        return false;
-    }
-
-    /**
-     * Normalizes a username for consistent storage and comparison.
-     * Converts to lower-case using a fixed locale.
-     */
-    private static String normalizeUser(String u) {
-        return u.toLowerCase(Locale.ROOT);
-    }
-
-    /**
-     * Returns a non-null, non-blank string.
-     * If the input is null or blank, returns "unknown".
-     */
-    private static String nullSafe(String s) {
-        return (s == null || s.isBlank()) ? "unknown" : s;
-    }
-
-    /**
-     * Converts the event's timestamp to epoch minutes (UTC).
-     * Useful for aligning into time buckets.
-     */
-    private static long toEpochMinute(SecurityEvent e) {
-        return e.getTimestamp().atZone(ZoneOffset.UTC).toEpochSecond() / 60;
-    }
-
-    /**
-     * Formats a bucket ID string for the given epoch minute and bucket size in minutes.
-     * Aligns the minute to the nearest bucket boundary and formats as yyyyMMddHHmm.
-     */
-    private static String formatBucketId(long epochMinute, int bucketMinutes) {
-        long aligned = (epochMinute / bucketMinutes) * bucketMinutes;
-        return LocalDateTime.ofEpochSecond(aligned * 60, 0, ZoneOffset.UTC).format(BUCKET_FMT);
     }
 
     /**
@@ -185,28 +140,9 @@ public class BruteForceDetector implements Detector {
     private List<String> keysForWindow(BruteForceScope scope, String id, long epochMinute, int bucketsToSum) {
         int step = cfg.getBucketMinutes();
         return IntStream.range(0, bucketsToSum)
-                .mapToObj(i -> formatBucketId(epochMinute - (long) i * step, step))
+                .mapToObj(i -> DetectorUtils.formatBucketId(epochMinute - (long) i * step, step))
                 .map(bucketId -> bucketKey(scope, id, bucketId))
                 .collect(Collectors.toList());
-    }
-
-    /**
-     * Reads multiple Redis counter keys and returns the sum of their values.
-     * Ignores null or non-numeric values.
-     */
-    private long sumBuckets(List<String> keys) {
-        long sum = 0L;
-        List<String> vals = redis.opsForValue().multiGet(keys);
-        if (vals == null) return 0L;
-        for (String v : vals) {
-            if (v != null && !v.isEmpty()) {
-                try {
-                    sum += Long.parseLong(v);
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
-        return sum;
     }
 
     /**
@@ -232,5 +168,4 @@ public class BruteForceDetector implements Detector {
                 reason
         );
     }
-
 }

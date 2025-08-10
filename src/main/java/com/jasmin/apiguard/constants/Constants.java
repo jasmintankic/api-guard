@@ -10,5 +10,6 @@ public class Constants {
     public static String KNOWN_BAD_CORRELATION_ID = "KNOWN_BAD_CORRELATION_ID";
     public static String KNOWN_BAD_IP = "KNOWN_BAD_IP";
     public static final String DEVICE_ABUSE = "DEVICE_ABUSE";
-
+    public static final String TRAFFIC_SPIKE = "TRAFFIC_SPIKE";
+    public static final String DDOS_ATTACK = "DDOS_ATTACK";
 }
