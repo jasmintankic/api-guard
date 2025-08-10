@@ -22,7 +22,7 @@ public class ApiGuardController {
     private final ExtractUtils extractUtils;
 
     @RequestMapping(
-            value = "/**",
+            value = "/ingest/**",
             method = {
                     RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT,
                     RequestMethod.DELETE, RequestMethod.PATCH, RequestMethod.HEAD,
@@ -54,4 +54,9 @@ public class ApiGuardController {
 
         return ResponseEntity.ok(apiGuardService.check(event));
     }
+
+//    @GetMapping("/dashboard")
+//    public String forwardRoot() {
+//        return "forward:/dashboard/index.html";
+//    }
 }

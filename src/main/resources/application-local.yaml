@@ -113,7 +113,7 @@ detectors:
     cool-off-seconds: 180
     exclude-patterns: ["/health", "/metrics", "/static", "/favicon"]
   ddos:
-    enabled: true                    # If false, detect() returns Optional.empty()
+    enabled: false                    # If false, detect() returns Optional.empty()
     keyPrefix: "ag"                  # Redis key namespace prefix (e.g., ag:ip:1.2.3.4:s1)
     # Fixed-window TTLs (seconds)
     windowsS1TtlSeconds: 2           # TTL for 1s bucket keys
@@ -173,19 +173,15 @@ extractors:
       - source: HEADER
         key: user-agent
 
-threat-bucket-properties:
-  day-key-prefix: apiguard:threats           # details ZSET: <prefix>:YYYY-MM-DD
-  agg-prefix: apiguard:agg                    # aggregates live under this prefix
-  tmp-prefix: apiguard:tmp                    # temp keys for unions
+threat-store:
   retention-days: 10
-  max-header-bytes: 32768
-  max-body-bytes: 65536
-  max-results: 10000                          # safety cap per request
-  summary:
-    top-ips: 20                               # how many IPs for the overview
-    top-threats-per-ip: 5
-    top-paths-per-ip: 5
-    temp-ttl-seconds: 60
+  max-body-bytes: 8192
+  header-allowlist:
+    - content-type
+    - user-agent
+    - x-forwarded-for
+    - cf-connecting-ip
+    - x-request-id
 
 server:
   servlet:
