@@ -24,7 +24,9 @@ public class ExtractUtils {
             byte[] body
     ) {
         List<ExtractRule> rules = config.getRules().getOrDefault(propertyName, Collections.emptyList());
-        if (rules.isEmpty()) return null;
+        if (rules.isEmpty()) {
+            return null;
+        }
 
         Map<String, List<String>> ciHeaders = new LinkedCaseInsensitiveMap<>();
         headers.forEach(ciHeaders::put);

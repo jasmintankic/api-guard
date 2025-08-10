@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Threat Details</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .kv td:first-child { width: 180px; color:#6c757d; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body class="p-4">
+<div class="container">
+    <div class="d-flex align-items-center mb-3">
+        <h1 class="h3 mb-0 me-3">Threat Details</h1>
+        <button id="refreshBtn" class="btn btn-sm btn-outline-secondary">Refresh</button>
+    </div>
+
+    <div id="status" class="alert alert-info py-2">Loading…</div>
+
+    <div class="row g-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <table class="table table-sm kv mb-0">
+                                <tbody>
+                                <tr><td><strong>ID</strong></td><td id="idCell">—</td></tr>
+                                <tr><td><strong>At</strong></td><td id="atCell">—</td></tr>
+                                <tr><td><strong>Correlation ID</strong></td><td id="corrCell">—</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="col-md-6">
+                            <table class="table table-sm kv mb-0">
+                                <tbody>
+                                <tr><td><strong>Method</strong></td><td id="methodCell">—</td></tr>
+                                <tr><td><strong>URL</strong></td><td id="urlCell">—</td></tr>
+                                <tr><td><strong>User-Agent</strong></td><td id="uaCell">—</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="mt-2 text-muted" id="metaLine"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-7">
+            <div class="card">
+                <div class="card-header">Threats</div>
+                <div class="card-body" id="threatsCell">—</div>
+            </div>
+        </div>
+
+        <div class="col-md-5">
+            <div class="card">
+                <div class="card-header">Recommendations</div>
+                <div class="card-body" id="recsCell">—</div>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span>Headers</span>
+                    <button class="btn btn-sm btn-outline-secondary" id="copyHeadersBtn">Copy</button>
+                </div>
+                <div class="card-body">
+                    <pre id="headersPre" class="mb-0">—</pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span>Request Body (decoded from <code>body</code>)</span>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary me-2" id="copyBodyBtn">Copy JSON</button>
+                        <a class="btn btn-sm btn-outline-primary" id="downloadBodyBtn" download="request-body.json">Download JSON</a>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <pre id="bodyPre" class="mb-0">—</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Build endpoint dynamically from ?id=... (with a hash fallback like #id=... just in case)
+    const BASE_URL = 'http://localhost:8080/api/dashboard/threats/';
+    const qs = new URLSearchParams(window.location.search);
+    const idFromSearch = qs.get('id');
+    const idFromHash = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('id');
+    const THREAT_ID = idFromSearch || idFromHash || '';
+    const ENDPOINT = THREAT_ID ? (BASE_URL + encodeURIComponent(THREAT_ID)) : null;
+
+    // If value is a JSON string, parse; else return as-is or fallback.
+    function parseMaybeJSON(value, fallback) {
+        try {
+            if (typeof value === 'string') return JSON.parse(value);
+            return value ?? fallback;
+        } catch { return fallback; }
+    }
+
+    // Normalize to array: handles arrays, JSON-stringified arrays, single strings.
+    function normalizeArray(value) {
+        let v = value;
+        if (typeof v === 'string') {
+            try { v = JSON.parse(v); } catch { /* keep as string */ }
+        }
+        if (Array.isArray(v)) return v;
+        if (v == null || v === '') return [];
+        if (typeof v === 'string') return [v];
+        return [];
+    }
+
+    const unique = arr => Array.from(new Set(arr));
+
+    function toBadges(items, cls) {
+        const a = normalizeArray(items);
+        if (!a.length) return '—';
+        return a.map(x => `<span class="badge ${cls} me-1 mb-1">${x}</span>`).join('');
+    }
+
+    function prettyJSON(obj) {
+        try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+    }
+
+    // Base64 decode; pretty-print JSON if possible. Always return a JSON string if parsable.
+    function decodeBase64ToJSONString(b64) {
+        try {
+            const text = atob(b64 || '');
+            try { return JSON.stringify(JSON.parse(text), null, 2); }
+            catch { return text || '—'; }
+        } catch {
+            return '—';
+        }
+    }
+
+    async function load() {
+        const status = document.getElementById('status');
+
+        if (!ENDPOINT) {
+            status.className = 'alert alert-danger py-2';
+            status.textContent = 'Missing "id" query parameter in the URL (e.g., details.html?id=YOUR-ID).';
+            return;
+        }
+
+        status.className = 'alert alert-info py-2';
+        status.textContent = 'Loading…';
+
+        try {
+            const res = await fetch(ENDPOINT);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            // Robust parsing
+            const threats = normalizeArray(data.threats);
+            const recs    = unique(normalizeArray(data.recs));
+            const headers = parseMaybeJSON(data.headers, {});
+            const createdAtMs = Number(data.createdAt);
+            const when = Number.isFinite(createdAtMs) ? new Date(createdAtMs).toLocaleString() : '—';
+
+            // Top details
+            document.getElementById('idCell').textContent = data.id || THREAT_ID || '—';
+            document.getElementById('atCell').textContent = when;
+            document.getElementById('corrCell').textContent = data.corrId || '—';
+            document.getElementById('methodCell').textContent = data.method || '—';
+            document.getElementById('urlCell').textContent = data.path || '—';
+            document.getElementById('uaCell').textContent = data.ua || '—';
+            document.getElementById('metaLine').textContent =
+                `IP: ${data.ip || '—'}  •  Endpoint: ${data.path || '—'}`;
+
+            // Threats & Recommendations
+            document.getElementById('threatsCell').innerHTML = toBadges(threats, 'text-bg-danger');
+            document.getElementById('recsCell').innerHTML    = toBadges(recs, 'text-bg-secondary');
+
+            // Headers
+            document.getElementById('headersPre').textContent = prettyJSON(headers);
+
+            // Body (base64 → JSON string)
+            const bodyText = decodeBase64ToJSONString(data.body);
+            document.getElementById('bodyPre').textContent = bodyText;
+
+            // Copy/Download
+            document.getElementById('copyHeadersBtn').onclick = async () => {
+                await navigator.clipboard.writeText(prettyJSON(headers));
+            };
+            document.getElementById('copyBodyBtn').onclick = async () => {
+                await navigator.clipboard.writeText(bodyText);
+            };
+            const blob = new Blob([bodyText], { type: 'application/json' });
+            document.getElementById('downloadBodyBtn').href = URL.createObjectURL(blob);
+
+            status.className = 'alert alert-success py-2';
+            status.textContent = `Loaded from ${ENDPOINT}`;
+        } catch (err) {
+            console.error(err);
+            status.className = 'alert alert-danger py-2';
+            status.textContent = `Failed to load: ${err.message}`;
+        }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', load);
+    load();
+</script>
+</body>
+</html>

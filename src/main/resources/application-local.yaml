@@ -155,6 +155,8 @@ extractors:
         key: x-correlation-id
       - source: HEADER
         key: x-request-id
+      - source: HEADER
+        key: correlation-id
     device:
       - source: HEADER
         key: vendor-id
