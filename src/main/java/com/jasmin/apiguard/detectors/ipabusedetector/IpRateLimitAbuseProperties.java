@@ -1,65 +1,71 @@
 package com.jasmin.apiguard.detectors.ipabusedetector;
 
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
-import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 
 @Data
 @Validated
 @ConfigurationProperties(prefix = "detectors.ip-rate-limit-abuse")
 public class IpRateLimitAbuseProperties {
 
-    /** Principal: ip:<ip> or ipua:<ip>:<uaHash> if true */
+    /** Master switch for the detector. */
+    private boolean enabled = true;
+
+    /** Whether to include UA hash as part of the principal (ipua:<ip>:<uaHash>). */
     private boolean includeUserAgentInPrincipal = false;
 
-    /** Allowlist of principals or raw IPs that bypass detection */
-    private List<String> allowlist = List.of();
+    /** Principals or raw IPs that bypass detection. */
+    @NotNull
+    private Set<String> allowlist = Set.of();
 
-    /** Ant-style path patterns that should not count (health, metrics, static, etc.) */
+    /** Ant-style path patterns excluded from detection. */
+    @NotNull
     private List<String> excludePatterns = List.of();
 
-    /* ---------- Request-credit model (token-bucket style) ---------- */
+    /** If Redis/script errors occur: true = allow (fail-open), false = deny (fail-closed). */
+    private boolean failOpenOnRedisError = true;
 
-    /** Credits added per second (sustained rate). Example: 2.0 ~= 2 req/s if creditsPerRequest=1 */
-    @Positive
-    private double creditsPerSecond = 2.0;
+    /** Jitter fraction added to lock TTLs (e.g., 0.10 = up to +10%). Range [0.0, 1.0]. */
+    @PositiveOrZero
+    private double lockJitterPercent = 0.10;
 
-    /** Max credits a principal can hold (burst size ceiling). Example: 10 allows ~10 instant requests */
-    @Positive
-    private double maxCredits = 10.0;
+    /* ------------------------- Strikes / Escalation ------------------------- */
 
-    /** Credits consumed by a single request. Typically 1. */
-    @Min(1)
-    private int creditsPerRequest = 1;
-
-    /** Idle TTL for the Redis key (cleanup only; does not affect decisions) */
-    private Duration idleTtl = Duration.ofMinutes(30);
-
-    /* ---------- Cool-off & escalation ---------- */
-
-    /** Lock duration (seconds) after a denial */
-    @Min(1)
-    private int coolOffSeconds = 30;
-
-    /** Optional: escalate lock if repeated denials occur within strikeWindowSeconds */
+    /** Enable strike-based escalation on the principal scope. */
     private boolean strikeEscalationEnabled = true;
 
-    /** Window to accumulate strikes */
-    @Min(1)
-    private int strikeWindowSeconds = 600; // 10 minutes
+    /** Window to accumulate strikes (seconds). */
+    private int strikeWindowSeconds = 600;
 
-    /** Lock durations by strike level (1,2,>=3) */
-    @Min(1)
-    private int strike1LockSeconds = 30;
+    /** Lock seconds for strike 1 / 2 / >=3 (will be jittered). */
+    private int strike1LockSeconds = 60;
 
-    @Min(1)
     private int strike2LockSeconds = 300;
 
-    @Min(1)
-    private int strike3LockSeconds = 3600;
+    private int strike3LockSeconds = 1800;
+
+    /** Base cool-off seconds when a scope trips (used by UA/Subnet and as base for principal). */
+    private int coolOffSeconds = 60;
+
+    /* ------------------------- Subnet / UA toggles ------------------------- */
+
+    private boolean subnetRateLimitEnabled = true;
+    private boolean userAgentRateLimitEnabled = true;
+
+    /** IPv4 CIDR prefix used for subnet grouping (default /24). */
+    private int subnetIpv4Prefix = 24;
+
+    /** IPv6 CIDR prefix used for subnet grouping (default /64). */
+    private int subnetIpv6Prefix = 64;
+
+    private IpAbuseScopeConfig ip = new IpAbuseScopeConfig();
+    private IpAbuseScopeConfig subnet    = new IpAbuseScopeConfig();
+    private IpAbuseScopeConfig userAgent = new IpAbuseScopeConfig();
+
 }

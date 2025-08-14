@@ -14,13 +14,6 @@ public class BruteForceProperties {
     /** Per-scope thresholds. */
     private final BruteForceThreshold threshold = new BruteForceThreshold();
 
-    /** Sliding window length (minutes) to aggregate across buckets. */
-    @Min(1)
-    private int windowMinutes = 5;
-
-    /** Each bucket’s duration in minutes (granularity). */
-    @Min(1)
-    private int bucketMinutes = 1;
 
     /** TTL for per-bucket keys (minutes). Keep > windowMinutes. */
     @Min(1)
@@ -29,4 +22,11 @@ public class BruteForceProperties {
     /** Cool-off lock TTL (seconds) when threshold trips. */
     @Positive
     private int coolOffSeconds = 60;
+
+    //Use seconds for the sliding window (ZSET-based)
+    private int windowSeconds = 300; // e.g., 5 minutes
+
+    private int maxEventsPerScope = 2000;
+
+    private boolean enabled = true;
 }

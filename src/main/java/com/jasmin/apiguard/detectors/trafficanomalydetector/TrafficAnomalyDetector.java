@@ -11,7 +11,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -32,8 +31,6 @@ public class TrafficAnomalyDetector implements Detector {
 
     // endpoint cool-off locks
     private static final String NS_LOCK  = "bs:ep:lock";    // bs:ep:lock:<epKey> -> "1" with TTL
-
-    private static final DateTimeFormatter BUCKET_FMT = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
 
     private final StringRedisTemplate redis;
     private final TrafficAnomalyProperties cfg;

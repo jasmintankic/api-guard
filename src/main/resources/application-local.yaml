@@ -8,19 +8,19 @@ spring:
 
 detectors:
   bruteforce:
+    enabled: true
     threshold:
       username: 5
       ip: 6
       user-ip: 3
-    window-minutes: 5     # aggregate over last 5 minutes
-    bucket-minutes: 1     # your 1-minute buckets
-    expiry-minutes: 12    # TTL for bucket keys
-    cool-off-seconds: 60  # lock TTL when tripped
+    expiry-minutes: 12      # TTL for bucket keys
+    cool-off-seconds: 60    # lock TTL when tripped
+    windowSeconds: 60       # sliding window size for raw request rate
+    maxEventsPerScope: 2000 # max events per scope (username, IP, user-IP) in the window
   enumeration:
+    enabled: true
     threshold: 3                  # Unique usernames from a single principal in 'windowMinutes' to trigger
-    windowMinutes: 5              # Sliding window size (minutes)
     bucketMinutes: 1              # Bucket granularity (minutes); usually 1 for minute-level resolution
-    expiryMinutes: 12             # TTL for per-bucket HLL keys (minutes)
     # IMPORTANT: Keep >= windowMinutes + bucketMinutes to avoid losing data early
 
     # === Lock settings ===
@@ -29,14 +29,12 @@ detectors:
 
     # === Signal B: distinct IPs per username ===
     userIpsThreshold: 30          # Distinct IPs hitting the same username to trigger
-    userIpsWindowMinutes: 15      # Sliding window for distinct IPs per username (minutes)
-    userIpsExpiryMinutes: 20      # TTL for user-IPs HLL buckets (minutes)
-    # IMPORTANT: Keep >= userIpsWindowMinutes + bucketMinutes
 
     # === Signal C: per-principal raw request rate ===
     ipRateLimit: 90                # Max requests allowed per principal in ipRateWindowSeconds
     ipRateWindowSeconds: 60        # Sliding window size for raw request limiter (seconds)
   replay:
+    enabled: true
     protected-methods: [POST, PUT, PATCH, DELETE]
     window-millis: 120000
     abuse-threshold: 3
@@ -47,22 +45,87 @@ detectors:
     idempotency-header-names: [Correlation-Id, Idempotency-Key, X-Request-Id]
     ignored-query-params: [utm_source, utm_medium, utm_campaign, utm_term, utm_content, tracking_id]
   ip-rate-limit-abuse:
+    # Master switch for this detector (true = enforce, false = completely off)
+    enabled: true
+
+    # Principal identity: if true -> ipua:<ip>:<uaHash>, else -> ip:<ip>
+    # Turn ON to reduce false positives behind large NATs/proxies (more keys in Redis).
     includeUserAgentInPrincipal: true
-    allowlist: []          # e.g., ["ip:127.0.0.1", "10.0.0.5"]
-    excludePatterns:
-    # Request-credit model
-    creditsPerSecond: 2   # sustained ~2 rps
-    maxCredits: 10        # burst of ~10 requests
-    creditsPerRequest: 1
-    idleTtl: 1m
-    # Lock & escalation
-    coolOffSeconds: 30
-    strikeEscalationEnabled: false
+
+    # Principals or raw IPs that bypass the detector entirely.
+    # Examples: ["ip:127.0.0.1", "10.0.0.5", "ipua:203.0.113.7:12345678"]
+    allowlist: []
+
+    # Ant-style path patterns to exclude from rate limiting (health checks, metrics, static files, etc.)
+    # Examples:
+    # - "/actuator/**"
+    # - "/health"
+    # - "/static/**"
+    excludePatterns: []
+
+    # On Redis/script error: true = allow traffic (fail-open), false = block (fail-closed)
+    # Prefer true for public endpoints; consider false for highly sensitive mutations.
+    failOpenOnRedisError: true
+
+    # Adds random +0..(N%) to lock TTL to avoid synchronized unlock spikes (e.g., 0.10 = up to +10%)
+    lockJitterPercent: 0.10
+
+    # ===== Strike escalation (principal scope only) =====
+    # If true, repeat offenders get longer locks based on strike count in the strike window.
+    strikeEscalationEnabled: true
+
+    # How long a strike "sticks" for escalation (seconds). Larger = harsher over time.
     strikeWindowSeconds: 600
-    strike1LockSeconds: 30
+
+    # Lock durations for 1st, 2nd, and 3rd+ strike (seconds). These are *minimums*; jitter may add a bit more.
+    strike1LockSeconds: 60
     strike2LockSeconds: 300
-    strike3LockSeconds: 3600
+    strike3LockSeconds: 1800
+
+    # Base cool-off (seconds) used when any scope trips (subnet/UA use this; principal may escalate above it).
+    coolOffSeconds: 60
+
+    # ===== Extra scopes =====
+    # Subnet limiting (helps blunt botnets rotating across nearby IPs).
+    subnetRateLimitEnabled: true
+
+    # User-Agent limiting (helps flag abusive SDKs or UA-rotation patterns).
+    userAgentRateLimitEnabled: true
+
+    # Subnet grouping precision (defaults: IPv4 /24, IPv6 /64). Larger prefix = broader grouping.
+    subnetIpv4Prefix: 24
+    subnetIpv6Prefix: 64
+
+    # ===== Per-scope token-bucket limits =====
+    # Each scope has its own "bucket" with a burst (max-credits), refill rate (credits-per-second),
+    # and per-request cost (credits-per-request). Effective sustained RPS ≈ cps / cost. Burst ≈ max / cost.
+
+    # Principal scope (ip: or ipua:)
+    ip:
+      # Max burst capacity (bigger = larger short spikes allowed)
+      max-credits: 10
+      # Refill rate per second (bigger = higher sustained throughput allowed)
+      credits-per-second: 2
+      # Cost per request (bigger = each request drains more; effective RPS ↓)
+      credits-per-request: 1
+      # Optional: idle TTL for the Redis state key (cleanup only; detector computes safe default if omitted)
+      # idle-ttl: 30m
+
+    # Subnet scope (usually stricter to blunt spray attacks)
+    subnet:
+      max-credits: 5        # lower burst across the subnet
+      credits-per-second: 0.5  # lower sustained rate across the subnet
+      # credits-per-request: 1   # (defaults to 1 if omitted)
+      # idle-ttl: 30m
+
+    # User-Agent scope (moderate)
+    user-agent:
+      max-credits: 8
+      credits-per-second: 1
+      # credits-per-request: 1   # (defaults to 1 if omitted)
+      # idle-ttl: 30m
   device-anomaly:
+    enabled: true
     # List of HTTP headers used to uniquely identify a device
     identifierHeaderCandidates: ["x-vendor-id", "x-fingerprint-id"]
 
@@ -95,13 +158,16 @@ detectors:
 
     # URL path patterns to ignore in anomaly detection
     excludePatterns: ["/health", "/metrics"]
+
+    maxIpsPerDevice: 2
   traffic-anomaly:
+    enabled: true
     # Learns baseline steadily, adapts within minutes but not jittery
     alpha: 0.22
     # Require a strong deviation from normal for an alert (≈ 4σ)
     z-threshold: 4.0
     # Guard against single-source noise; expect distributed surges
-    min-distinct-ips: 200
+    min-distinct-ips: 3
     # Don’t alert until we’ve seen enough distinct minutes
     min-sample-minutes: 15
     # Union of the last N minute-buckets when counting distinct IPs

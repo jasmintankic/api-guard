@@ -33,4 +33,8 @@ public class DeviceAnomalyProperties {
     private List<String> actionsOnFanout = new ArrayList<>(List.of("CHALLENGE_MFA", "RATE_LIMIT"));
     private List<String> actionsOnChurn  = new ArrayList<>(List.of("CHALLENGE_CAPTCHA"));
     private List<String> actionsDuringLock = new ArrayList<>(List.of("RATE_LIMIT"));
+
+    private int maxIpsPerDevice = 2;
+
+    private boolean enabled = true;
 }

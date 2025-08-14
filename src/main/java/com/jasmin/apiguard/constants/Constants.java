@@ -4,6 +4,8 @@ public class Constants {
     public static String BRUTE_FORCE_ATTACK = "BRUTE_FORCE_ATTACK";
     public static String ENUMERATION_ATTACK = "ENUMERATION_ATTACK";
     public static String IP_ABUSE = "IP_ABUSE";
+    public static String IP_ABUSE_USER_AGENT = "IP_ABUSE_USER_AGENT";
+    public static String SUBNET_ABUSE = "SUBNET_ABUSE";
     public static String REPLAY_ATTACK = "REPLAY_ATTACK";
     public static String DEVICE_FINGERPRINT_ABUSE = "DEVICE_FINGERPRINT_ABUSE";
     public static String KNOWN_BAD_DEVICE = "KNOWN_BAD_DEVICE";

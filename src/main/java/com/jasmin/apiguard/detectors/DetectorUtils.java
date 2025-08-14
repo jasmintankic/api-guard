@@ -1,6 +1,9 @@
 package com.jasmin.apiguard.detectors;
 
 import com.jasmin.apiguard.models.SecurityEvent;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -171,5 +174,30 @@ public class DetectorUtils {
             }
         }
         return sum;
+    }
+
+    public static String normalizeUsername(String username) {
+        if (username == null) return null;
+        String norm = username.trim().toLowerCase();
+
+        // Strip common email variations
+        int plusIndex = norm.indexOf('+');
+        if (plusIndex > 0 && norm.contains("@")) {
+            norm = norm.substring(0, plusIndex) + norm.substring(norm.indexOf("@"));
+        }
+
+        // Optionally remove dots (for gmail-like services)
+        if (norm.contains("@gmail.com")) {
+            String local = norm.substring(0, norm.indexOf('@')).replace(".", "");
+            norm = local + "@gmail.com";
+        }
+
+        return norm;
+    }
+
+    public static RedisScript<List<Object>> loadLuaScript(String path) {
+        @SuppressWarnings("unchecked")
+        Class<List<Object>> listOfLong = (Class<List<Object>>) (Class<?>) List.class;
+        return RedisScript.of(new ClassPathResource(path), listOfLong);
     }
 }

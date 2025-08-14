@@ -6,159 +6,229 @@ import com.jasmin.apiguard.detectors.DetectorUtils;
 import com.jasmin.apiguard.models.DetectionVerdict;
 import com.jasmin.apiguard.models.SecurityEvent;
 import lombok.RequiredArgsConstructor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataAccessException;
-import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.util.AntPathMatcher;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.*;
 
 @Service
 @RequiredArgsConstructor
 public class IpRateLimitAbuseDetector implements Detector {
 
-    private static final Logger log = LoggerFactory.getLogger(IpRateLimitAbuseDetector.class);
-
-    // Redis namespaces
-    private static final String NS_CREDITS = "rlc";       // request-credit state: rlc:<principal>
-    private static final String NS_LOCK    = "ipa:lock";  // principal cool-off: ipa:lock:<principal>
-    private static final String NS_STRIKE  = "ipa:strike";// strike counter:    ipa:strike:<principal>
+    private static final String NS_CREDITS = "rlc";
+    private static final String NS_LOCK = "ipa:lock";
+    private static final String NS_STRIKE = "ipa:strike";
 
     private final StringRedisTemplate redis;
     private final IpRateLimitAbuseProperties cfg;
     private final AntPathMatcher matcher = new AntPathMatcher();
 
+    private static final RedisScript<List<Object>> LUA_SCRIPT = DetectorUtils.loadLuaScript("lua/ip_rate_limit.lua");
+
     @Override
     public Optional<DetectionVerdict> detect(SecurityEvent event) {
-        final String principal = principalId(event);
-
-        if (bypassed(principal, event)) {
+        if (!cfg.isEnabled()) {
             return Optional.empty();
         }
 
-        // Cheap path: already in cool-off?
-        if (isLocked(principal)) {
-            return Optional.of(new DetectionVerdict(
-                    List.of(Constants.IP_ABUSE),
-                    List.of("RATE_LIMIT"),
-                    "Principal in cool-off"
-            ));
+        final String principal = buildPrincipal(event);
+
+        if (isBypassed(principal, event)) {
+            return Optional.empty();
         }
 
-        // Main decision: try to spend request credits
-        CreditDecision dec = trySpendCredits(principal);
-
-        if (!dec.allowed()) {
-            int ttl = cfg.getCoolOffSeconds();
-            if (cfg.isStrikeEscalationEnabled()) {
-                ttl = Math.max(ttl, escalateLock(principal));
-            }
-            lockPrincipal(principal, Duration.ofSeconds(ttl));
-
-            // Optional: structured log for tuning
-            log.debug("IP rate-limit denial principal={} creditsAfter={} cps={} max={} cost={} lock={}s",
-                    principal, String.format("%.3f", dec.creditsAfter()),
-                    cfg.getCreditsPerSecond(), cfg.getMaxCredits(), cfg.getCreditsPerRequest(), ttl);
-
-            String msg = String.format(
-                    "Rate limited principal=%s (credits=%.3f, need=%d, max=%.1f, cps=%.2f/s)",
-                    principal, dec.creditsAfter(), cfg.getCreditsPerRequest(),
-                    cfg.getMaxCredits(), cfg.getCreditsPerSecond()
+        // 1) Subnet scope
+        if (cfg.isSubnetRateLimitEnabled()) {
+            final String subnetId = buildSubnetId(DetectorUtils.nullSafe(event.getIp()));
+            var v = enforceScope(
+                    subnetId,
+                    cfg.getSubnet(),
+                    false,
+                    "Subnet in cool-off",
+                    "Subnet over limit",
+                    List.of("RATE_LIMIT_SUBNET"),
+                    List.of(Constants.SUBNET_ABUSE)
             );
 
-            return Optional.of(new DetectionVerdict(
-                    List.of(Constants.IP_ABUSE),
-                    Arrays.asList("RATE_LIMIT", "BLOCK_IP"),
-                    msg
-            ));
-        }
-
-        return Optional.empty();
-    }
-
-    private record CreditDecision(boolean allowed, double creditsAfter) {}
-
-    /**
-     * Single request-credit pool per principal.
-     * Hash fields: "c" (credits, double), "ts" (last update epoch ms, long).
-     * Uses Redis WATCH/MULTI/EXEC (optimistic CAS) for concurrency safety.
-     */
-    private CreditDecision trySpendCredits(String principal) {
-        final String key = creditsKey(principal);
-        final long nowMs = Instant.now().toEpochMilli();
-
-        // Small bounded retry for contention
-        for (int attempt = 0; attempt < 5; attempt++) {
-            Map<Object, Object> state = redis.opsForHash().entries(key);
-
-            double max = cfg.getMaxCredits();
-            double cps = cfg.getCreditsPerSecond();
-            int cost   = cfg.getCreditsPerRequest();
-
-            double credits = max; // default full
-            long last = nowMs;    // default now
-
-            if (!state.isEmpty()) {
-                try {
-                    credits = Double.parseDouble((String) state.getOrDefault("c", String.valueOf(max)));
-                    last    = Long.parseLong((String) state.getOrDefault("ts", String.valueOf(nowMs)));
-                } catch (NumberFormatException nfe) {
-                    // Defensive: reset to sane defaults
-                    credits = max;
-                    last = nowMs;
-                }
+            if (v.isPresent()) {
+                return v;
             }
+        }
 
-            // Refill based on elapsed time
-            double deltaSec = Math.max(0, (nowMs - last) / 1000.0);
-            credits = Math.min(max, credits + deltaSec * cps);
+        // 2) User-Agent scope
+        if (cfg.isUserAgentRateLimitEnabled()) {
+            final String uaId = buildUserAgentKey(event.getUserAgent());
+            var v = enforceScope(
+                    uaId,
+                    cfg.getUserAgent(),
+                   false,
+                    "User-Agent in cool-off",
+                    "User-Agent over limit",
+                    List.of("RATE_LIMIT_UA"),
+                    List.of(Constants.IP_ABUSE_USER_AGENT)
+            );
+            if (v.isPresent()) return v;
+        }
 
-            boolean allowed = credits >= cost;
-            double newCredits = allowed ? (credits - cost) : credits;
+        // 3) ip scope (supports strike escalation)
+        return enforceScope(
+                principal,
+                cfg.getIp(),
+                cfg.isStrikeEscalationEnabled(),
+                "Principal in cool-off",
+                "Rate limited",
+                List.of("RATE_LIMIT", "BLOCK_IP"),
+                List.of(Constants.IP_ABUSE)
+        );
+    }
 
-            List<Object> tx = redis.execute(new SessionCallback<>() {
-                @Override
-                public List<Object> execute(org.springframework.data.redis.core.RedisOperations ops) throws DataAccessException {
-                    ops.watch(key);
-                    ops.multi();
-                    ops.opsForHash().put(key, "c", Double.toString(newCredits));
-                    ops.opsForHash().put(key, "ts", Long.toString(nowMs));
-                    ops.expire(key, Duration.ofSeconds(idleTtlSeconds()));
-                    return ops.exec();
-                }
-            });
+    private Optional<DetectionVerdict> enforceScope(
+            String subjectId,
+            IpAbuseScopeConfig sc,
+            boolean escalationEnabled,
+            String lockedReason,
+            String overLimitReason,
+            List<String> actionsOnDeny,
+            List<String> tags
+    ) {
+        // Already locked?
+        if (isLocked(subjectId)) {
+            return verdict(tags, actionsOnDeny.size() == 1 ? List.of(actionsOnDeny.getFirst()) : actionsOnDeny, lockedReason + " - " + subjectId);
+        }
 
-            if (tx != null) {
-                return new CreditDecision(allowed, newCredits);
+        // Try to spend a token
+        boolean allowed = spend(subjectId, sc);
+        if (allowed) {
+            return Optional.empty();
+        }
+
+        // Not allowed -> compute lock TTL (with optional strike escalation on principal scope)
+        int ttl = cfg.getCoolOffSeconds();
+        if (escalationEnabled) {
+            ttl = Math.max(ttl, escalateLockSeconds(subjectId));
+        }
+        lock(subjectId, ttl);
+
+        return verdict(tags, actionsOnDeny, overLimitReason + ": " + subjectId);
+    }
+
+    private boolean spend(String subjectId, IpAbuseScopeConfig sc) {
+        final int idleTtl = computeIdleTtlSeconds(sc);
+        final List<String> keys = List.of(creditsKey(subjectId));
+        final List<String> args = List.of(
+                String.valueOf(sc.getMaxCredits()),
+                String.valueOf(sc.getCreditsPerSecond()),
+                String.valueOf(sc.getCreditsPerRequest()),
+                String.valueOf(idleTtl)
+        );
+
+        List<Object> result = redis.execute(LUA_SCRIPT, keys, args.toArray());
+        if (result == null || result.size() < 2) {
+            return cfg.isFailOpenOnRedisError(); // policy: fail-open or fail-closed on Redis issues
+        }
+        // first item is 1/0
+        return "1".equals(result.getFirst().toString()) || "1.0".equals(result.getFirst().toString());
+    }
+
+    private int computeIdleTtlSeconds(IpAbuseScopeConfig sc) {
+        final var set = sc.getIdleTtl();
+        if (set != null && !set.isZero() && !set.isNegative()) {
+            return (int) clamp(set.toSeconds(), 60, 86_400);
+        }
+        double seconds = (sc.getMaxCredits() / Math.max(0.0001, sc.getCreditsPerSecond())) + 60.0;
+        return (int) clamp(Math.ceil(seconds), 60, 86_400);
+    }
+
+    private void lock(String subject, int seconds) {
+        int ttl = withJitter(seconds, cfg.getLockJitterPercent());
+        redis.opsForValue().set(lockKey(subject), "1", Duration.ofSeconds(ttl));
+    }
+
+    private boolean isLocked(String subject) {
+        Long ttl = redis.getExpire(lockKey(subject));
+        return ttl != null && ttl > 0;
+    }
+
+    private int escalateLockSeconds(String subject) {
+        String key = NS_STRIKE + ":" + subject;
+        Long strikes = redis.opsForValue().increment(key);
+
+        if (strikes != null && strikes == 1L) {
+            redis.expire(key, Duration.ofSeconds(cfg.getStrikeWindowSeconds()));
+        }
+
+        if (strikes == null) {
+            return cfg.getCoolOffSeconds();
+        }
+
+        if (strikes >= 3) {
+            return cfg.getStrike3LockSeconds();
+        }
+
+        if (strikes == 2) {
+            return cfg.getStrike2LockSeconds();
+        }
+
+        return cfg.getStrike1LockSeconds();
+    }
+
+    private String buildPrincipal(SecurityEvent e) {
+        String ip = DetectorUtils.nullSafe(e.getIp());
+        if (!cfg.isIncludeUserAgentInPrincipal()) return "ip:" + ip;
+        return "ipua:" + ip + ":" + normalizedUaHash(e.getUserAgent());
+    }
+
+    private String buildUserAgentKey(String ua) {
+        return "ua:" + normalizedUaHash(ua);
+    }
+
+    private String normalizedUaHash(String ua) {
+        String norm = DetectorUtils.nullSafe(ua).trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", " ");
+        return Integer.toString(norm.hashCode());
+    }
+
+    private String buildSubnetId(String ip) {
+        if (ip == null) return "subnet:unknown";
+        if (ip.contains(":")) {
+            // IPv6
+            int prefix = Math.min(Math.max(cfg.getSubnetIpv6Prefix(), 16), 128);
+            int hextets = Math.max(1, prefix / 16);
+            String[] parts = ip.split(":", -1);
+            StringBuilder sb = new StringBuilder("subnet6:");
+            for (int i = 0; i < hextets && i < parts.length; i++) {
+                if (i > 0) sb.append(':');
+                sb.append(parts[i].isEmpty() ? "0" : parts[i]);
             }
-            // else CAS lost → retry
+            sb.append("::/").append(prefix);
+            return sb.toString();
+        } else {
+            // IPv4
+            int prefix = Math.min(Math.max(cfg.getSubnetIpv4Prefix(), 8), 32);
+            String[] parts = ip.split("\\.");
+            if (parts.length != 4) return "subnet:unknown";
+            int octets = Math.max(1, prefix / 8);
+            StringBuilder sb = new StringBuilder("subnet4:");
+            for (int i = 0; i < Math.min(octets, 3); i++) {
+                if (i > 0) sb.append('.');
+                sb.append(parts[i]);
+            }
+            if (octets >= 3) sb.append(".0");
+            sb.append("/").append(prefix);
+            return sb.toString();
         }
-
-        // In extreme contention or Redis hiccup, fail safe and deny
-        log.warn("Credit CAS retries exhausted for principal={}", principal);
-        return new CreditDecision(false, 0.0);
     }
 
-    private long idleTtlSeconds() {
-        var ttl = cfg.getIdleTtl();
-        if (ttl != null && !ttl.isZero() && !ttl.isNegative()) {
-            // clamp to [60s, 1d] to avoid immortal keys
-            return Math.max(60, Math.min(86_400, ttl.toSeconds()));
+    private boolean isBypassed(String principal, SecurityEvent e) {
+        if (!cfg.isEnabled()) {
+            return true;
         }
-        // sensible default: full-refill time + 60s
-        double seconds = (cfg.getMaxCredits() / Math.max(0.0001, cfg.getCreditsPerSecond())) + 60.0;
-        return Math.max(60, Math.min(86_400, (long) Math.ceil(seconds)));
-    }
-
-    /* -------------------- Bypass & principal -------------------- */
-
-    private boolean bypassed(String principal, SecurityEvent e) {
-        if (cfg.getAllowlist().contains(e.getIp()) || cfg.getAllowlist().contains(principal)) return true;
+        if (cfg.getAllowlist().contains(DetectorUtils.nullSafe(e.getIp()))) return true;
+        if (cfg.getAllowlist().contains(principal)) return true;
         String path = DetectorUtils.nullSafe(e.getPath());
         for (String pat : cfg.getExcludePatterns()) {
             if (matcher.match(pat, path)) return true;
@@ -166,39 +236,25 @@ public class IpRateLimitAbuseDetector implements Detector {
         return false;
     }
 
-    private String principalId(SecurityEvent e) {
-        String ip = DetectorUtils.nullSafe(e.getIp());
-        if (!cfg.isIncludeUserAgentInPrincipal()) return "ip:" + ip;
-        String ua = DetectorUtils.nullSafe(e.getUserAgent());
-        return "ipua:" + ip + ":" + ua.hashCode();
+    private String creditsKey(String subject) {
+        return NS_CREDITS + ":" + subject;
     }
 
-    private boolean isLocked(String principal) {
-        Long ttl = redis.getExpire(NS_LOCK + ":" + principal);
-        return ttl > 0;
+    private String lockKey(String subject) {
+        return NS_LOCK + ":" + subject;
     }
 
-    private void lockPrincipal(String principal, Duration ttl) {
-        redis.opsForValue().set(NS_LOCK + ":" + principal, "1", ttl);
+    private Optional<DetectionVerdict> verdict(List<String> tags, List<String> actions, String message) {
+        return Optional.of(new DetectionVerdict(tags, actions, message));
     }
 
-    /**
-     * Escalate lock duration based on strike count within a sliding TTL.
-     * Returns the lock seconds to apply for this denial.
-     */
-    private int escalateLock(String principal) {
-        String key = NS_STRIKE + ":" + principal;
-        Long strikes = redis.opsForValue().increment(key);
-        if (strikes != null && strikes == 1L) {
-            redis.expire(key, Duration.ofSeconds(cfg.getStrikeWindowSeconds()));
-        }
-        if (strikes == null) return cfg.getCoolOffSeconds();
-        if (strikes >= 3) return cfg.getStrike3LockSeconds();
-        if (strikes == 2) return cfg.getStrike2LockSeconds();
-        return cfg.getStrike1LockSeconds();
+    private static double clamp(double v, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 
-    private String creditsKey(String principal) {
-        return NS_CREDITS + ":" + principal;
+    private static int withJitter(int seconds, double fraction) {
+        double f = Math.max(0.0, Math.min(1.0, fraction));
+        int jitter = (int) Math.floor(seconds * (Math.random() * f));
+        return seconds + Math.max(0, jitter);
     }
 }

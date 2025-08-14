@@ -38,7 +38,6 @@ public class ReplayAttackDetector implements Detector {
     private final StringRedisTemplate redis;
     private final ReplayProperties cfg;
 
-    // Reuse a single ObjectMapper for JSON canonicalization
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Override
@@ -65,9 +64,7 @@ public class ReplayAttackDetector implements Detector {
 
         // Idempotency enforcement: first seen wins within window
         final String enforceKey = NS_ENFORCE + ":" + requestIdentity;
-        Boolean firstSeen = redis.opsForValue().setIfAbsent(
-                enforceKey, "1", Duration.ofMillis(cfg.getWindowMillis())
-        );
+        Boolean firstSeen = redis.opsForValue().setIfAbsent(enforceKey, "1", Duration.ofMillis(cfg.getWindowMillis()));
         if (Boolean.TRUE.equals(firstSeen)) {
             // First occurrence in the window → allow through
             return Optional.empty();
